@@ -25,9 +25,6 @@ app.get("/", (req, res) => {
 // Store nicknames associated with socket IDs
 const nicknames = new Map();
 
-// Store room membership: room name -> Set of socket IDs
-const rooms = new Map();
-
 io.on("connection", (socket) => {
   console.log('User connected to game server: ', socket.id);
 
@@ -84,6 +81,11 @@ io.on("connection", (socket) => {
   });
 });
 
+// Use Render's assigned port or fallback to 3000 for local development
+const PORT = process.env.PORT || 10000;
+http.listen(PORT, () => {
+  console.log(`Game server running on port ${PORT}`);
+});
 
 /*
 
