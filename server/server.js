@@ -1,4 +1,5 @@
 
+require('dotenv').config({ path: '.env' });
 const express = require("express");
 const app = express();
 const http = require("http").createServer(app);
@@ -22,8 +23,14 @@ app.get("/", (req, res) => {
 //   }
 // });
 
-// Store nicknames associated with socket IDs
-const nicknames = new Map();
+// const rooms = new Map(); // Map to store room data: { members: [socket.id], controllerIds: Map(socket.id -> controllerId), nextControllerId: number }
+// // Store nicknames associated with socket IDs
+// const nicknames = new Map();
+// const userRooms = new Map(); // Map to store socket.id -> current room
+
+const rooms = new Map(); // Map to store room data: { members: [socket.id], networkControllerIds: Map(socket.id -> networkControllerId), nextNetworkControllerId: number }
+const nicknames = new Map(); // Map to store socket.id -> nickname mappings
+const userRooms = new Map(); // Map to store socket.id -> current room
 
 io.on("connection", (socket) => {
   console.log('User connected to game server: ', socket.id);
@@ -41,16 +48,143 @@ io.on("connection", (socket) => {
   socket.on('join-room', (room) => {
     console.log(`${socket.id}:${nicknames.get(socket.id)} wants to join room ${room}`);
     
-    // Add socket to room membership
-    // if (!rooms.has(room)) {
-    //   rooms.set(room, new Set());
-    // }
+    // Leave any previous room
+    const currentRoom = userRooms.get(socket.id);
+    if (currentRoom && rooms.has(currentRoom)) {
+      const roomData = rooms.get(currentRoom);
+      const index = roomData.members.indexOf(socket.id);
+      if (index !== -1) {
+        roomData.members.splice(index, 1);
+        roomData.networkControllerIds.delete(socket.id);
+        // Emit room-member-left to the previous room (excluding the leaving user)
+        socket.to(currentRoom).emit('room-member-left', {
+          socketId: socket.id,
+          nickname: nicknames.get(socket.id) || 'Unknown'
+        });
+        // Emit update-room-members to all clients in the previous room
+        const memberData = roomData.members.map((id) => ({
+          socketId: id,
+          nickname: nicknames.get(id) || 'Unknown',
+          networkControllerId: roomData.networkControllerIds.get(id)
+        }));
+        io.to(currentRoom).emit('update-room-members', currentRoom, memberData);
+        if (roomData.members.length === 0) {
+          rooms.delete(currentRoom); // Clean up empty room
+        }
+        socket.leave(currentRoom);
+        console.log(`${socket.id} left room ${currentRoom}`);
+      }
+    }
 
+    // Initialize new room if it doesn't exist
+    if (!rooms.has(room)) {
+      rooms.set(room, {
+        members: [],
+        networkControllerIds: new Map(),
+        nextNetworkControllerId: 0
+      });
+    }
+
+    // Add socket to room membership
     socket.join(room);
+    
+    const roomData = rooms.get(room);
+    // Add user to the room's member array and assign networkControllerId if not already present
+    if (!roomData.members.includes(socket.id)) {
+      roomData.members.push(socket.id);
+      roomData.networkControllerIds.set(socket.id, roomData.nextNetworkControllerId);
+      roomData.nextNetworkControllerId += 1; // Increment for the next user
+    }
+
+    // Update userRooms to track the user's current room
+    userRooms.set(socket.id, room);
+
+    // Get the user's networkControllerId
+    const networkControllerId = roomData.networkControllerIds.get(socket.id);
+
+    // Emit room-member-join to the room (excluding the joining user)
+    socket.to(room).emit('room-member-join', {
+      socketId: socket.id,
+      nickname: nicknames.get(socket.id) || 'Unknown',
+      networkControllerId: networkControllerId
+    });
+
+    // Send the room and networkControllerId back to the client
+    io.to(socket.id).emit('join-room', room, networkControllerId);
+
+    // Emit update-room-members to all clients in the room
+    const memberData = roomData.members.map((id) => ({
+      socketId: id,
+      nickname: nicknames.get(id) || 'Unknown',
+      networkControllerId: roomData.networkControllerIds.get(id)
+    }));
+    io.to(room).emit('update-room-members', room, memberData);
+
+    console.log(`Rooms for ${socket.id}:`, socket.rooms);
+    console.log(`Room ${room} members:`, roomData.members);
+    console.log(`Room ${room} networkControllerIds:`, Object.fromEntries(roomData.networkControllerIds));
+  });
+
+  /*socket.on('join-room', (room) => {
+    console.log(`${socket.id}:${nicknames.get(socket.id)} wants to join room ${room}`);
+    
+    // Leave any previous room
+    const currentRoom = userRooms.get(socket.id);
+    if (currentRoom && rooms.has(currentRoom)) {
+      const roomData = rooms.get(currentRoom);
+      const index = roomData.members.indexOf(socket.id);
+      if (index !== -1) {
+        roomData.members.splice(index, 1);
+        // Emit update-room-members to all clients in the previous room
+        const memberData = roomData.members.map((id) => ({
+          socketId: id,
+          nickname: nicknames.get(id) || 'Unknown'
+        }));
+        io.to(currentRoom).emit('update-room-members', currentRoom, memberData);
+        if (roomData.members.length === 0) {
+          rooms.delete(currentRoom); // Clean up empty room
+        }
+        socket.leave(currentRoom);
+        console.log(`${socket.id} left room ${currentRoom}`);
+      }
+    }
+
+    // Initialize new room if it doesn't exist
+    if (!rooms.has(room)) {
+      rooms.set(room, { members: [] });
+    }
+
+    // Add socket to room membership
+    socket.join(room);
+    
+    const roomData = rooms.get(room);
+    // Add user to the room's member array if not already present
+    if (!roomData.members.includes(socket.id)) {
+      roomData.members.push(socket.id);
+    }
+
+    // Update userRooms to track the user's current room
+    userRooms.set(socket.id, room);
+
+    // Send the room back to the client
     io.to(socket.id).emit('join-room', room);
 
-    console.log(`Rooms for ${socket.id}:`, socket.rooms); // Log rooms
-  });
+    // Emit room-member-join to the room (excluding the joining user)
+    socket.to(room).emit('room-member-join', {
+      socketId: socket.id,
+      nickname: nicknames.get(socket.id) || 'Unknown'
+    });
+
+    // Emit update-room-members to all clients in the room
+    const memberData = roomData.members.map((id) => ({
+      socketId: id,
+      nickname: nicknames.get(id) || 'Unknown'
+    }));
+    io.to(room).emit('update-room-members', room, memberData);
+
+    console.log(`Rooms for ${socket.id}:`, socket.rooms);
+    console.log(`Room ${room} members:`, roomData.members);
+  });*/
 
   // Handle incoming messages
   socket.on('message', (msg, room) => {
@@ -70,10 +204,122 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle incoming messages
+  socket.on('broadcast-data', (param, room) => {
+    if (typeof param !== 'string') {
+      console.log('Invalid param received:', param);
+      return;
+    }
+    console.log('broadcast-data received:', param, ` (room:${room})`);
+    // Broadcast attack to all connected clients
+    if (room === '') {
+    } else {
+      console.log('send broadcast-data to room members');
+      io.to(room).emit('broadcast-data', socket.id, nicknames.get(socket.id), param);
+    }
+  });
+
+  // // Handle incoming messages
+  // socket.on('ready', (isReady, room) => {
+  //   if (typeof isReady !== 'boolean') {
+  //     console.log('Invalid ready received:', isReady);
+  //     return;
+  //   }
+  //   console.log('Ready received:', isReady, ` (room:${room})`);
+  //   // Broadcast ready to all connected clients
+  //   if (room === '') {
+  //   } else {
+  //     console.log('send ready to room members');
+  //     io.to(room).emit('ready', socket.id, nicknames.get(socket.id), isReady);
+  //   }
+  // });
+
+  // // Handle incoming messages
+  // socket.on('attack', (param, room) => {
+  //   if (typeof param !== 'string') {
+  //     console.log('Invalid param received:', param);
+  //     return;
+  //   }
+  //   console.log('Attack received:', param, ` (room:${room})`);
+  //   // Broadcast attack to all connected clients
+  //   if (room === '') {
+  //   } else {
+  //     console.log('send attack to room members');
+  //     io.to(room).emit('attack', socket.id, nicknames.get(socket.id), param);
+  //   }
+  // });
+
   // Handle disconnection
   socket.on('disconnect', (reason) => {
     console.log(`Client disconnected: ${socket.id}, Reason: ${reason}`);
+    
+    // Remove user from their current room
+    const room = userRooms.get(socket.id);
+    if (room && rooms.has(room)) {
+      const roomData = rooms.get(room);
+      const index = roomData.members.indexOf(socket.id);
+      if (index !== -1) {
+        roomData.members.splice(index, 1);
+        roomData.networkControllerIds.delete(socket.id);
+        // Emit room-member-left to the room
+        io.to(room).emit('room-member-left', {
+          socketId: socket.id,
+          nickname: nicknames.get(socket.id) || 'Unknown'
+        });
+        // Emit update-room-members to all clients in the room
+        const memberData = roomData.members.map((id) => ({
+          socketId: id,
+          nickname: nicknames.get(id) || 'Unknown',
+          networkControllerId: roomData.networkControllerIds.get(id)
+        }));
+        io.to(room).emit('update-room-members', room, memberData);
+        if (roomData.members.length === 0) {
+          rooms.delete(room); // Clean up empty room
+        }
+      }
+    }
+
+    // Clean up user data
+    userRooms.delete(socket.id);
+    nicknames.delete(socket.id);
   });
+  
+  /*
+  // Handle disconnection
+  socket.on('disconnect', (reason) => {
+    console.log(`Client disconnected: ${socket.id}, Reason: ${reason}`);
+    
+    // Remove user from their current room
+    const room = userRooms.get(socket.id);
+    if (room && rooms.has(room)) {
+      const roomData = rooms.get(room);
+      const index = roomData.members.indexOf(socket.id);
+      if (index !== -1) {
+        roomData.members.splice(index, 1);
+
+        // Emit room-member-left to the room
+        io.to(room).emit('room-member-left', {
+          socketId: socket.id,
+          nickname: nicknames.get(socket.id) || 'Unknown'
+        });
+        
+        // Emit update-room-members to all clients in the room
+        const memberData = roomData.members.map((id) => ({
+          socketId: id,
+          nickname: nicknames.get(id) || 'Unknown'
+        }));
+        io.to(room).emit('update-room-members', room, memberData);
+        if (roomData.members.length === 0) {
+          rooms.delete(room); // Clean up empty room
+        }
+      }
+    }
+
+    // Clean up user data
+    userRooms.delete(socket.id);
+    nicknames.delete(socket.id);
+  });
+  */
 
   // Handle errors
   socket.on('error', (error) => {
